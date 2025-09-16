@@ -5,7 +5,7 @@ class HandTracker:
     def __init__(self, max_num_hands=2, detection_conf=0.7, tracking_conf=0.7):
         self.mp_hands = mp.solutions.hands
         self.hands = self.mp_hands.Hands(
-            max_num_hands=max_num_hands, # <--- แก้ไขตรงนี้เป็น 2
+            max_num_hands=max_num_hands,
             min_detection_confidence=detection_conf,
             min_tracking_confidence=tracking_conf
         )
@@ -21,7 +21,10 @@ class HandTracker:
                 hand_info = {
                     "id": hand_idx,
                     "landmarks": [],
-                    "handedness": self.results.multi_handedness[hand_idx].classification[0].label
+                    "handedness": self.results.multi_handedness[hand_idx].classification[0].label,
+                    # <<<<<<<<<<<<<<< ADDED THIS LINE >>>>>>>>>>>>>>>
+                    "mp_landmarks": hand_landmarks # ส่งข้อมูล landmark ดั้งเดิมกลับไปด้วย
+                    # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
                 }
                 for lm in hand_landmarks.landmark:
                     h, w, _ = frame.shape

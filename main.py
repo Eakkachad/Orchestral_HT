@@ -1,178 +1,204 @@
+# ==============================================================================
+# 1. IMPORT LIBRARIES
+# ==============================================================================
 import cv2
 import pygame
-import math
+import pyautogui
 from hand_tracker import HandTracker
-from gestures import is_fist
+from gestures import is_fist, is_open_palm
 
-# --- 1. การตั้งค่า ---
-# ตั้งค่าหน้าจอ Pygame
-SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 720
-pygame.init()
-pygame.mixer.init() # เริ่มต้นระบบเสียง
-screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-pygame.display.set_caption("Gesture Soundboard")
-clock = pygame.time.Clock()
-font_chord = pygame.font.SysFont("Arial", 22, bold=True)
-font_info = pygame.font.SysFont("Arial", 24)
+pyautogui.FAILSAFE = False
 
-# ตั้งค่ากล้องและ Hand Tracker
+# ==============================================================================
+# 2. INITIAL SETUP & CONSTANTS
+# ==============================================================================
+# --- ตั้งค่ากล้องและขนาดหน้าจออัตโนมัติ ---
+# <<<<<<<<<<<<<<<<<<<< CHANGE POINT 1: DYNAMIC SCREEN SIZE >>>>>>>>>>>>>>>>>>>>
 cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, SCREEN_WIDTH)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, SCREEN_HEIGHT)
-tracker = HandTracker(max_num_hands=2)
+# อ่านเฟรมแรกเพื่อเอาขนาดจริงๆ ของกล้อง
+ret, frame = cap.read()
+if not ret:
+    print("Cannot open camera!")
+    exit()
+SCREEN_HEIGHT, SCREEN_WIDTH, _ = frame.shape
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
-# --- 2. ตั้งค่าคอร์ดและเสียง ---
-CHORD_NAMES = [
-    "E", "Fsm", "Gsm", "A", "B", "Csm", "Ebdim", 
-    "E_h", "Fsm_h", "Gsm_h", "A_h"
-]
+# --- ตั้งค่าหน้าจอ Pygame ตามขนาดกล้อง ---
+pygame.init()
+screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+pygame.display.set_caption("Keyboard Gesture Controller v2.2")
+clock = pygame.time.Clock()
+font = pygame.font.SysFont("Arial", 24, bold=True)
+font_status = pygame.font.SysFont("Arial", 28, bold=True)
 
-# โหลดไฟล์เสียง (ต้องมีโฟลเดอร์ sounds และไฟล์เสียงที่ชื่อตรงกัน)
-try:
-    CHORD_SOUNDS = {name: pygame.mixer.Sound(f"/home/eggchad160606/project/ait_work/com_vision/python/mini_project/source/{name}.wav") for name in CHORD_NAMES}
-except pygame.error as e:
-    print(f"Error loading sound files: {e}")
-    print("Please make sure you have a 'sounds' folder with all 11 .wav files.")
-    # สร้างเสียงเปล่าๆ เพื่อให้โปรแกรมรันต่อได้ แต่จะไม่มีเสียง
-    CHORD_SOUNDS = {}
+# --- ตั้งค่า Hand Tracker ---
+tracker = HandTracker(max_num_hands=2, detection_conf=0.8, tracking_conf=0.8)
 
-# --- 3. คลาสสำหรับ UI วงกลมคอร์ด ---
-class ChordCircle:
-    def __init__(self, x, y, radius, chord_name, sound):
-        self.x, self.y = x, y
-        self.radius = radius
-        self.rect = pygame.Rect(x - radius, y - radius, radius * 2, radius * 2)
-        self.chord_name = chord_name
-        self.sound = sound
+# --- ตั้งค่าโซนคีย์บอร์ด ---
+KEYS = ['a', 's', 'd', 'g', 'h']
+NUM_KEYS = len(KEYS)
+ZONE_AREA_HEIGHT = SCREEN_HEIGHT // 2
+ZONE_WIDTH = SCREEN_WIDTH // NUM_KEYS
+
+
+def draw_hand_status(screen, hand):
+    """วาดสถานะของมือ (FIST, OPEN) ใกล้ๆ ข้อมือเพื่อการดีบัก"""
+    if not hand: return
+    
+    wrist_pos = hand["landmarks"][0]
+    status = "UNKNOWN"
+    color = (200, 200, 200)
+
+    if is_fist(hand["landmarks"]):
+        status = "FIST"
+        color = (255, 100, 100) # Red
+    elif is_open_palm(hand["landmarks"]):
+        status = "OPEN"
+        color = (100, 255, 100) # Green
+    
+    text_surf = font.render(status, True, color)
+    screen.blit(text_surf, (wrist_pos[0] + 15, wrist_pos[1] + 15))
+
+
+# ==============================================================================
+# 3. KeyZone Class
+# ==============================================================================
+class KeyZone:
+    def __init__(self, x, key):
+        self.x = x
+        self.width = ZONE_WIDTH
+        self.key = key
+        self.rect = pygame.Rect(x, 0, ZONE_WIDTH, ZONE_AREA_HEIGHT)
+        self.is_held = False
+        self.hand_in_zone = False
+        self.last_tap_time = 0
+        self.palm_hover_start_time = 0
+        self.sustain_activated = False
+        self.color_idle = (255, 255, 255, 50)
+        self.color_hover = (255, 255, 0, 100)
+        self.color_held = (100, 255, 100, 150)
+
+    def update(self, hand_landmarks, status_callback):
+        hand_pos = hand_landmarks[8] if hand_landmarks else None
+        currently_in_zone = self.rect.collidepoint(hand_pos) if hand_pos else False
+        current_time = pygame.time.get_ticks()
+
+        if currently_in_zone:
+            if is_open_palm(hand_landmarks):
+                if self.palm_hover_start_time == 0: self.palm_hover_start_time = current_time
+                if current_time - self.palm_hover_start_time > 1000 and not self.sustain_activated:
+                    if not self.is_held:
+                        self.is_held = True
+                        pyautogui.keyDown(self.key)
+                        status_callback(f"SUSTAIN: {self.key.upper()}")
+                    else:
+                        self.is_held = False
+                        pyautogui.keyUp(self.key)
+                        status_callback(f"RELEASE: {self.key.upper()}")
+                    self.sustain_activated = True
+            else:
+                self.palm_hover_start_time = 0
+                self.sustain_activated = False
+
+            if not is_open_palm(hand_landmarks) and not is_fist(hand_landmarks) and not self.is_held and current_time - self.last_tap_time > 500:
+                pyautogui.press(self.key, interval=0.05)
+                self.last_tap_time = current_time
+                status_callback(f"TAP: {self.key.upper()}")
         
-        self.is_playing = False
-        self.is_hovered = False
-        
-        # Colors
-        self.color_idle = (100, 100, 255) # สีน้ำเงิน
-        self.color_hover = (255, 180, 105) # สีส้ม
-        self.color_playing = (100, 255, 100) # สีเขียว
-        self.font_color = (255, 255, 255)
-
-    def update(self, hand_pos):
-        # เช็คว่ามือมาโดนวงกลมหรือไม่
-        self.is_hovered = self.rect.collidepoint(hand_pos) if hand_pos else False
-
-        if self.is_hovered and not self.is_playing and self.sound:
-            # เริ่มเล่นเสียงแบบวนลูป
-            self.sound.play(loops=-1)
-            self.is_playing = True
-        elif not self.is_hovered and self.is_playing and self.sound:
-            # หยุดเล่นเสียงแบบ fade out
-            self.sound.fadeout(1500) # ค่อยๆ เบาลงใน 1.5 วินาที
-            self.is_playing = False
+        if not currently_in_zone:
+            self.palm_hover_start_time = 0
+            self.sustain_activated = False
+        self.hand_in_zone = currently_in_zone
 
     def draw(self, screen):
-        current_color = self.color_idle
-        if self.is_playing:
-            current_color = self.color_playing
-        elif self.is_hovered:
-            current_color = self.color_hover
-            
-        pygame.draw.circle(screen, current_color, (self.x, self.y), self.radius)
-        pygame.draw.circle(screen, (255, 255, 255), (self.x, self.y), self.radius, 3) # ขอบขาว
-
-        # แสดงชื่อคอร์ด
-        text_surf = font_chord.render(self.chord_name, True, self.font_color)
-        text_rect = text_surf.get_rect(center=(self.x, self.y))
+        color = self.color_idle
+        if self.is_held: color = self.color_held
+        elif self.hand_in_zone: color = self.color_hover
+        s = pygame.Surface((self.width, ZONE_AREA_HEIGHT), pygame.SRCALPHA)
+        s.fill(color)
+        screen.blit(s, (self.x, 0))
+        pygame.draw.rect(screen, (255, 255, 255), self.rect, 2)
+        text_surf = font.render(self.key.upper(), True, (255, 255, 255))
+        text_rect = text_surf.get_rect(center=(self.x + self.width // 2, 40))
         screen.blit(text_surf, text_rect)
 
-# --- 4. สร้าง UI คอร์ด ---
-chord_circles = []
-RADIUS = 50
-START_Y = 70
-SPACING_Y = 65
-X_POS1 = 80
-X_POS2 = 160
-for i, name in enumerate(CHORD_NAMES):
-    x_pos = X_POS1 if (i // 2) % 2 == 0 else X_POS2
-    y_pos = START_Y + (i * SPACING_Y)
-    
-    # ทำให้วงกลมสุดท้ายไม่ตกขอบล่าง
-    if y_pos > SCREEN_HEIGHT - RADIUS:
-       y_pos -= (len(CHORD_NAMES) - i) * SPACING_Y # ย้ายแถวขึ้น
-       x_pos += 100
 
-    sound = CHORD_SOUNDS.get(name) # ใช้ .get เพื่อป้องกัน error ถ้าโหลดเสียงไม่สำเร็จ
-    chord_circles.append(ChordCircle(x_pos, y_pos % (SCREEN_HEIGHT - RADIUS), RADIUS, name, sound))
+# ==============================================================================
+# 4. OBJECT CREATION & STATE VARIABLES
+# ==============================================================================
+key_zones = [KeyZone(i * ZONE_WIDTH, KEYS[i]) for i in range(NUM_KEYS)]
+status_text = ""
+status_timer = 0
 
+def set_status(text):
+    global status_text, status_timer
+    status_text = text
+    status_timer = 90
 
-# --- 5. Game Loop หลัก ---
+# ==============================================================================
+# 5. MAIN GAME LOOP
+# ==============================================================================
 running = True
-master_volume = 1.0
-
 while running:
-    # --- การรับภาพและหา Landmark ---
-    ret, frame = cap.read()
-    if not ret:
-        break
-    
-    frame = cv2.flip(frame, 1)
-    frame_with_landmarks, all_hands = tracker.get_landmarks(frame, draw=True)
-
-    # --- การประมวลผลท่าทาง ---
-    left_hand, right_hand = None, None
-    for hand in all_hands:
-        if hand["handedness"] == "Left":
-            left_hand = hand
-        elif hand["handedness"] == "Right":
-            right_hand = hand
-
-    # มือซ้าย: เลือกและเล่นคอร์ด
-    left_hand_pos = left_hand["landmarks"][8] if left_hand else None # ใช้ปลายนิ้วชี้
-    for circle in chord_circles:
-        circle.update(left_hand_pos)
-    
-    # มือขวา: ควบคุมความดัง
-    if right_hand:
-        wrist_y = right_hand["landmarks"][0][1]
-        # map ค่า y (0 ถึง SCREEN_HEIGHT) ไปเป็น volume (1.0 ถึง 0.0)
-        master_volume = 1.0 - (wrist_y / SCREEN_HEIGHT)
-        if master_volume < 0: master_volume = 0.0
-        if master_volume > 1: master_volume = 1.0
-        
-        # ตั้งค่าความดังให้ทุก Channel
-        pygame.mixer.set_num_channels(50) # เพิ่มจำนวนช่องเสียงเผื่อไว้
-        for i in range(pygame.mixer.get_num_channels()):
-            pygame.mixer.Channel(i).set_volume(master_volume)
-
-    # สองมือ: กำหมัดเพื่อหยุดทุกอย่าง
-    left_fist = is_fist(left_hand["landmarks"]) if left_hand else False
-    right_fist = is_fist(right_hand["landmarks"]) if right_hand else False
-    if left_fist and right_fist:
-        pygame.mixer.stop()
-        for circle in chord_circles:
-            circle.is_playing = False # รีเซ็ตสถานะ
-
-    # --- การแสดงผลบน Pygame ---
-    # แสดงภาพจากกล้อง
-    frame_rgb = cv2.cvtColor(frame_with_landmarks, cv2.COLOR_BGR2RGB)
-    frame_surface = pygame.surfarray.make_surface(frame_rgb.swapaxes(0, 1))
-    screen.blit(frame_surface, (0, 0))
-
-    # วาด UI คอร์ด
-    for circle in chord_circles:
-        circle.draw(screen)
-
-    # วาดแถบ Volume
-    vol_bar_height = master_volume * (SCREEN_HEIGHT - 40)
-    pygame.draw.rect(screen, (255, 255, 255, 150), [SCREEN_WIDTH - 50, 20, 30, SCREEN_HEIGHT - 40], 2, border_radius=5)
-    pygame.draw.rect(screen, (100, 255, 100, 200), [SCREEN_WIDTH - 45, (SCREEN_HEIGHT-20) - vol_bar_height, 20, vol_bar_height], border_radius=5)
-
-
-    # --- จัดการ Event และอัปเดตหน้าจอ ---
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
 
+    ret, frame = cap.read()
+    if not ret: break
+    
+    frame = cv2.flip(frame, 1)
+    # เราสามารถให้ tracker วาดเส้นได้เลย เพราะตอนนี้ขนาดภาพกับจอเท่ากันแล้ว
+    frame_with_landmarks, all_hands = tracker.get_landmarks(frame, draw=True)
+
+    left_hand, right_hand = None, None
+    for hand in all_hands:
+        if hand["landmarks"][0][0] < SCREEN_WIDTH / 2:
+            left_hand = hand
+        else:
+            right_hand = hand
+
+    for zone in key_zones:
+        zone.update(left_hand["landmarks"] if left_hand else None, set_status)
+
+    left_fist = is_fist(left_hand["landmarks"]) if left_hand else False
+    right_fist = is_fist(right_hand["landmarks"]) if right_hand else False
+    if left_fist and right_fist:
+        keys_were_held = False
+        for zone in key_zones:
+            if zone.is_held:
+                keys_were_held = True
+                zone.is_held = False
+                pyautogui.keyUp(zone.key)
+        if keys_were_held:
+            set_status("STOP ALL")
+            pygame.time.delay(500)
+
+    # --- Drawing ---
+    # <<<<<<<<<<<<<<<<<<<< CHANGE POINT 2: SIMPLIFIED DRAWING >>>>>>>>>>>>>>>>>>>>
+    # แปลงภาพและวาดลงจอตรงๆ ไม่ต้องมี scaling
+    frame_rgb = cv2.cvtColor(frame_with_landmarks, cv2.COLOR_BGR2RGB)
+    frame_surface = pygame.surfarray.make_surface(frame_rgb.swapaxes(0, 1))
+    screen.blit(frame_surface, (0,0))
+    # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+    for zone in key_zones:
+        zone.draw(screen)
+    
+    draw_hand_status(screen, left_hand)
+    draw_hand_status(screen, right_hand)
+
+    if status_timer > 0:
+        status_surf = font_status.render(status_text, True, (255, 255, 0))
+        screen.blit(status_surf, (20, SCREEN_HEIGHT - 50))
+        status_timer -= 1
+
     pygame.display.flip()
     clock.tick(30)
 
-# --- สิ้นสุดโปรแกรม ---
+# --- CLEANUP ---
+for zone in key_zones:
+    if zone.is_held:
+        pyautogui.keyUp(zone.key)
 cap.release()
 pygame.quit()
